@@ -19,22 +19,25 @@ def extract_signature_from_image_bytes(image_bytes):
         # 2. Binarization
         if gray.shape[0] == 0 or gray.shape[1] == 0:
              raise ValueError("Empty or invalid grayscale image data.")
+
         # Added check if all pixels are the same, which can cause issues with Otsu
         if np.all(gray == gray[0, 0]):
              # Fallback to a simple binary threshold if image is uniform
-             _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU) # Still include OSTU flag for consistency, though it might not change anything
+             # Use a mid-range threshold like 128
+             _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
         else:
             try:
+                # Attempt Otsu's thresholding
                 _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             except cv2.error as e:
-                 # Fallback if Otsu's fails for some reason
+                 # Fallback if Otsu's fails for some reason (e.g., image too small or uniform)
                  print(f"Warning: Otsu's thresholding failed ({e}), falling back to simple threshold.")
                  _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
 
 
         # 3. Morphological Operations
         # Use a slightly larger kernel for potentially better connection/noise removal
-        kernel = np.ones((5,5),np.uint8)
+        kernel = np.ones((3,3),np.uint8) # Keeping kernel size reasonable
         thresh_cleaned = cv2.dilate(thresh, kernel, iterations = 1)
         thresh_cleaned = cv2.erode(thresh_cleaned, kernel, iterations = 1)
 
@@ -44,23 +47,23 @@ def extract_signature_from_image_bytes(image_bytes):
         if not contours:
             raise ValueError("No contours found in the cleaned image after morphological operations.")
 
-        # 5. Filter and Score Contours
+        # 5. Filter and Score Contours - Parameters significantly relaxed
         potential_signatures_with_scores = []
 
         # Define ranges and weights for scoring (THESE ARE EXAMPLES - TUNE FOR YOUR IMAGES)
-        # Adjusted ranges to be less strict and cover a wider variety
-        area_range = (300, 100000) # Wider example range
-        density_range = (0.1, 0.9) # Wider example range
-        solidity_range = (0.1, 0.98) # Wider example range
-        extent_range = (0.1, 0.98) # Wider example range
-        aspect_ratio_range = (0.1, 15.0) # Wider example range
+        # Significantly widened ranges to be very inclusive
+        area_range = (50, 200000) # Very wide area range
+        density_range = (0.05, 0.95) # Very wide density range
+        solidity_range = (0.05, 1.0) # Very wide solidity range (almost any shape)
+        extent_range = (0.05, 1.0) # Very wide extent range (almost any shape)
+        aspect_ratio_range = (0.05, 20.0) # Very wide aspect ratio range
 
         # Weights for each criterion (adjust to emphasize more important factors)
-        weight_area = 0.8 # Slightly reduced weight
-        weight_density = 2.5 # Keeping higher weight for density
-        weight_solidity = 2.0 # Keeping higher weight for solidity
-        weight_extent = 1.5
-        weight_aspect_ratio = 0.9
+        weight_area = 0.5 # Reduced weight
+        weight_density = 1.5 # Keeping some emphasis on density
+        weight_solidity = 1.0 # Keeping some emphasis on solidity
+        weight_extent = 0.8
+        weight_aspect_ratio = 0.7
 
 
         for contour in contours:
@@ -69,7 +72,7 @@ def extract_signature_from_image_bytes(image_bytes):
             x, y, w, h = cv2.boundingRect(contour)
 
             # Lowered minimum area and dimensions significantly
-            if area > 50 and w > 3 and h > 3:
+            if area > 10 and w > 1 and h > 1: # Extremely low minimums
                 try:
                     # Calculate properties
                     roi = thresh_cleaned[y:y+h, x:x+w]
@@ -88,38 +91,35 @@ def extract_signature_from_image_bytes(image_bytes):
                     score = 0
 
                     # Scoring logic: higher score for properties within the preferred ranges
-                    # Adjusted scoring to be more forgiving outside the exact center of ranges
+                    # Adjusted scoring to be very forgiving outside the exact center of ranges
                     if area_range[0] <= area <= area_range[1]:
                         score += weight_area * (1 - abs(area - (area_range[0] + area_range[1])/2) / ((area_range[1] - area_range[0])/2 + 1e-6)) # Added epsilon to avoid division by zero
-                    else: score += weight_area * 0.1 # Small score even if outside range
+                    else: score += weight_area * 0.05 # Small score even if outside range
 
 
                     if density_range[0] <= ink_density <= density_range[1]:
                          score += weight_density * (1 - abs(ink_density - (density_range[0] + density_range[1])/2) / ((density_range[1] - density_range[0])/2 + 1e-6))
-                    else: score += weight_density * 0.1
+                    else: score += weight_density * 0.05
 
 
                     if solidity_range[0] <= solidity <= solidity_range[1]:
                          score += weight_solidity * (1 - abs(solidity - (solidity_range[0] + solidity_range[1])/2) / ((solidity_range[1] - solidity_range[0])/2 + 1e-6))
-                    # Less harsh penalty for solidity outside the expected range
-                    else: score -= weight_solidity * 0.2
+                    else: score -= weight_solidity * 0.1 # Small penalty
 
 
                     if extent_range[0] <= extent <= extent_range[1]:
                          score += weight_extent * (1 - abs(extent - (extent_range[0] + extent_range[1])/2) / ((extent_range[1] - extent_range[0])/2 + 1e-6))
-                    # Less harsh penalty for extent outside the expected range
-                    else: score -= weight_extent * 0.1
+                    else: score -= weight_extent * 0.05 # Smaller penalty
 
 
                     if aspect_ratio_range[0] <= aspect_ratio <= aspect_ratio_range[1]:
                          score += weight_aspect_ratio * (1 - abs(aspect_ratio - (aspect_ratio_range[0] + aspect_ratio_range[1])/2) / ((aspect_ratio_range[1] - aspect_ratio_range[0])/2 + 1e-6))
-                    # Less harsh penalty for extreme aspect ratios
-                    else: score -= weight_aspect_ratio * 0.2
+                    else: score -= weight_aspect_ratio * 0.1 # Small penalty
 
 
                     # Add contour and its score if score is above a minimum threshold
-                    # Lowered the minimum score required to be considered a candidate significantly
-                    min_candidate_score = (weight_density * 0.2 + weight_solidity * 0.2) # Example: needs only a slight fit in density and solidity
+                    # Lowered the minimum score required to be considered a candidate significantly - Close to zero
+                    min_candidate_score = 0.1 # Example: Requires minimal positive score
                     if score > min_candidate_score:
                          potential_signatures_with_scores.append({'contour': contour, 'score': score, 'bbox': (x,y,w,h)})
 
@@ -132,7 +132,7 @@ def extract_signature_from_image_bytes(image_bytes):
 
         if not potential_signatures_with_scores:
             # This is the error message you received, made it more specific
-            raise ValueError("No contours passed the property filtering and scoring. Consider adjusting area, dimension, range, weight, and min_candidate_score parameters.")
+            raise ValueError("No contours passed the property filtering and scoring with current lenient parameters. Consider checking the image quality, binarization step, or if signatures appear as connected contours.")
 
 
         # Sort potential signatures by score in descending order
@@ -143,9 +143,9 @@ def extract_signature_from_image_bytes(image_bytes):
         final_signature_contour = None
         # Tune similarity_threshold: lower means more things considered duplicates
         # Tune compare_size: affects performance and precision of comparison
-        # Adjusted similarity threshold and compare size again
-        similarity_threshold = 0.85 # Lowered threshold for considering images as duplicates (TUNE THIS!)
-        compare_size = (80, 40) # Smaller resize dimensions for faster comparison (TUNE THIS!)
+        # Adjusted similarity threshold and compare size again - these are crucial for uniqueness
+        similarity_threshold = 0.95 # Increased threshold for considering images as duplicates (TUNE THIS!) - Needs to be quite high for identical copies
+        compare_size = (120, 60) # Adjusted resize dimensions for comparison (TUNE THIS!)
 
 
         for potential_sig_info in potential_signatures_with_scores:
@@ -179,6 +179,7 @@ def extract_signature_from_image_bytes(image_bytes):
                 if resized_sig_img_gray.shape == unique_region_gray.shape:
                      try:
                          # Using correlation for similarity (TM_CCOEFF_NORMED is robust to lighting)
+                         # Increased the requirement for similarity to detect identical copies
                          similarity = cv2.matchTemplate(resized_sig_img_gray, unique_region_gray, cv2.TM_CCOEFF_NORMED)[0,0]
                          if similarity > similarity_threshold:
                              is_duplicate = True
@@ -191,10 +192,10 @@ def extract_signature_from_image_bytes(image_bytes):
 
             if not is_duplicate:
                 unique_signatures_regions_gray.append(resized_sig_img_gray)
-                # The first unique contour from the sorted list is the best scoring unique one
+                # The first unique contour from the sorted list (by score) is the best unique candidate
                 final_signature_contour = contour
-                # We found the best unique candidate, no need to check lower scoring ones
-                break # Exit the loop once the best unique candidate is found
+                # Found the best unique candidate, exit loop
+                break
 
 
         if final_signature_contour is None:
