@@ -23,71 +23,105 @@ def extract_signature_from_image_bytes(image_bytes):
     if not contours:
         raise Exception("No signature found")
 
-    # Filter contours based on area, pixel density, solidity, and extent
-    min_area = 200 # Minimum contour area (adjust as needed)
-    min_ink_density = 0.15 # Minimum ink density (adjust as needed)
-    min_solidity = 0.3 # Minimum solidity (adjust as needed, signatures might be lower)
-    max_solidity = 0.9 # Maximum solidity (adjust as needed, exclude solid blocks)
-    min_extent = 0.2 # Minimum extent (adjust as needed)
-    max_extent = 0.9 # Maximum extent (adjust as needed)
+    # Filter and score contours based on potential signature characteristics
+    potential_signatures_with_scores = []
 
-    potential_signatures_contours = []
+    # Define ideal ranges and weights for scoring (these need tuning)
+    area_range = (500, 50000) # Example range, adjust based on typical signature size
+    density_range = (0.2, 0.6) # Example range for ink density
+    solidity_range = (0.3, 0.7) # Example range for solidity
+    extent_range = (0.3, 0.7) # Example range for extent
+    aspect_ratio_range = (0.5, 5.0) # Example range for aspect ratio
+
+    # Weights for each criterion (adjust to emphasize more important factors)
+    weight_area = 1.0
+    weight_density = 1.5 # Density might be a stronger indicator
+    weight_solidity = 1.0
+    weight_extent = 1.0
+    weight_aspect_ratio = 0.8 # Aspect ratio might be less critical than density/solidity
+
 
     for contour in contours:
         area = cv2.contourArea(contour)
         x, y, w, h = cv2.boundingRect(contour)
 
-        if area > min_area:
-            # Calculate ink density
+        if area > 100: # Basic minimum area filter
+            # Calculate properties
             roi = thresh_cleaned[y:y+h, x:x+w]
             ink_density = cv2.countNonZero(roi) / (w * h) if (w * h) > 0 else 0
 
-            # Calculate solidity
             hull = cv2.convexHull(contour)
             hull_area = cv2.contourArea(hull)
             solidity = float(area)/hull_area if hull_area > 0 else 0
 
-            # Calculate extent
             rect_area = w * h
             extent = float(area)/rect_area if rect_area > 0 else 0
 
-            # Apply filters
-            if (ink_density > min_ink_density and
-                min_solidity < solidity < max_solidity and
-                min_extent < extent < max_extent):
-                 potential_signatures_contours.append(contour)
+            aspect_ratio = w / h if h > 0 else 0
+
+            # Calculate a score based on how well the properties fit the defined ranges
+            score = 0
+
+            if area_range[0] < area < area_range[1]:
+                score += weight_area * (1 - abs(area - (area_range[0] + area_range[1])/2) / ((area_range[1] - area_range[0])/2)) # Score higher closer to center of range
+            elif area >= area_range[1]: score += weight_area * 0.1 # Small score for very large
+
+            if density_range[0] < ink_density < density_range[1]:
+                 score += weight_density * (1 - abs(ink_density - (density_range[0] + density_range[1])/2) / ((density_range[1] - density_range[0])/2))
+            elif ink_density >= density_range[1]: score += weight_density * 0.1
+
+            if solidity_range[0] < solidity < solidity_range[1]:
+                 score += weight_solidity * (1 - abs(solidity - (solidity_range[0] + solidity_range[1])/2) / ((solidity_range[1] - solidity_range[0])/2))
+
+            if extent_range[0] < extent < extent_range[1]:
+                 score += weight_extent * (1 - abs(extent - (extent_range[0] + extent_range[1])/2) / ((extent_range[1] - extent_range[0])/2))
+
+            if aspect_ratio_range[0] < aspect_ratio < aspect_ratio_range[1]:
+                 score += weight_aspect_ratio * (1 - abs(aspect_ratio - (aspect_ratio_range[0] + aspect_ratio_range[1])/2) / ((aspect_ratio_range[1] - aspect_ratio_range[0])/2))
 
 
-    if not potential_signatures_contours:
-        raise Exception("No potential signature contours found after filtering based on multiple criteria.")
+            # Add contour and its score if score is above a minimum threshold (adjust as needed)
+            min_score_threshold = (weight_area * 0.5 + weight_density * 0.5 + weight_solidity * 0.5 + weight_extent * 0.5 + weight_aspect_ratio * 0.5) # Example minimum score
+            if score > min_score_threshold:
+                 potential_signatures_with_scores.append({'contour': contour, 'score': score, 'area': area})
 
-    # Now, compare the image content within the bounding boxes of potential signatures
-    # to find unique instances.
+
+    if not potential_signatures_with_scores:
+        raise Exception("No potential signature contours found after scoring.")
+
+    # Sort potential signatures by score in descending order
+    potential_signatures_with_scores.sort(key=lambda x: x['score'], reverse=True)
+
+    # Now, iterate through the sorted potential signatures and find unique ones based on image content
     unique_signatures_regions = []
-    unique_signatures_contours = []
-    similarity_threshold = 0.95 # Threshold for considering images as duplicates (adjust as needed)
-    compare_size = (100, 50) # Resize images for comparison (adjust as needed)
+    final_signature_contour = None
+    similarity_threshold = 0.9 # Threshold for considering images as duplicates (adjust as needed)
+    compare_size = (150, 75) # Resize images for comparison (adjust as needed, maybe slightly larger)
 
 
-    for contour in potential_signatures_contours:
+    for potential_sig_info in potential_signatures_with_scores:
+        contour = potential_sig_info['contour']
         x, y, w, h = cv2.boundingRect(contour)
+
         # Extract the image region from the original color image
         potential_sig_img = open_cv_image[y:y+h, x:x+w]
 
         # Resize for comparison
         if potential_sig_img.shape[0] > 0 and potential_sig_img.shape[1] > 0:
-             resized_sig_img = cv2.resize(potential_sig_img, compare_size)
-             # Convert to grayscale for simpler comparison
+             # Ensure consistent resizing even for very narrow/short bounding boxes
+             target_w = compare_size[0]
+             target_h = compare_size[1]
+             # Maintain aspect ratio somewhat if needed, or just force resize
+             # resized_sig_img = cv2.resize(potential_sig_img, compare_size, interpolation=cv2.INTER_AREA)
+             resized_sig_img = cv2.resize(potential_sig_img, (target_w, target_h), interpolation=cv2.INTER_AREA)
              resized_sig_img_gray = cv2.cvtColor(resized_sig_img, cv2.COLOR_BGR2GRAY)
         else:
              continue # Skip empty regions
 
         is_duplicate = False
         for unique_region_gray in unique_signatures_regions:
-            # Use structural similarity index (SSIM) or a simple pixel comparison
-            # For exact duplicates, simple equality check after flattening can work if resized to same size
             if resized_sig_img_gray.shape == unique_region_gray.shape:
-                 # Using correlation for similarity - 1.0 means perfect match
+                 # Using correlation for similarity
                  similarity = cv2.matchTemplate(resized_sig_img_gray, unique_region_gray, cv2.TM_CCOEFF_NORMED)[0,0]
                  if similarity > similarity_threshold:
                      is_duplicate = True
@@ -95,13 +129,15 @@ def extract_signature_from_image_bytes(image_bytes):
 
         if not is_duplicate:
             unique_signatures_regions.append(resized_sig_img_gray)
-            unique_signatures_contours.append(contour)
+            # We found a unique signature candidate, let's take the first one with the highest score
+            final_signature_contour = contour
+            break # Stop after finding the best scoring unique signature
 
-    if not unique_signatures_contours:
-        raise Exception("No unique signature instances found after duplicate filtering.")
+    if final_signature_contour is None:
+         raise Exception("No unique signature instances found after duplicate filtering based on scoring.")
 
-    # Select the first unique signature found (you could add logic to pick based on position if needed)
-    final_signature_contour = unique_signatures_contours[0]
+
+    # Extract the final signature using the bounding box of the selected contour
     x, y, w, h = cv2.boundingRect(final_signature_contour)
     signature = open_cv_image[y:y+h, x:x+w]
 
