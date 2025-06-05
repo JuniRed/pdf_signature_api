@@ -6,3 +6,4 @@ pillow
 PyMuPDF
 gunicorn
 pdf2image
+flask_cors
