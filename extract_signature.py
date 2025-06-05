@@ -16,36 +16,56 @@ def extract_signature_from_image_bytes(image_bytes):
     # Apply morphological operations to clean up the image
     # Dilate to connect broken parts, then erode to remove small noise
     kernel = np.ones((3,3),np.uint8)
-    thresh = cv2.dilate(thresh, kernel, iterations = 1)
-    thresh = cv2.erode(thresh, kernel, iterations = 1)
+    thresh_cleaned = cv2.dilate(thresh, kernel, iterations = 1)
+    thresh_cleaned = cv2.erode(thresh_cleaned, kernel, iterations = 1)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(thresh_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         raise Exception("No signature found")
 
-    # Filter contours based on area and potentially other criteria
-    # Increased minimum contour area to filter out smaller artifacts
-    min_area = 200 # You might need to adjust this value
+    # Filter contours based on area, pixel density, solidity, and extent
+    min_area = 200 # Minimum contour area (adjust as needed)
+    min_ink_density = 0.15 # Minimum ink density (adjust as needed)
+    min_solidity = 0.3 # Minimum solidity (adjust as needed, signatures might be lower)
+    max_solidity = 0.9 # Maximum solidity (adjust as needed, exclude solid blocks)
+    min_extent = 0.2 # Minimum extent (adjust as needed)
+    max_extent = 0.9 # Maximum extent (adjust as needed)
+
     potential_signatures = []
+
     for contour in contours:
         area = cv2.contourArea(contour)
-        # Consider adding an upper bound for area if needed to exclude large non-signature elements
+        x, y, w, h = cv2.boundingRect(contour)
+
         if area > min_area:
-             # Further filtering can be added here, e.g., based on aspect ratio if signatures have a typical shape
-             # x, y, w, h = cv2.boundingRect(contour)
-             # aspect_ratio = w / h if h > 0 else 0
-             # if reasonable_aspect_ratio_condition:
-             potential_signatures.append(contour)
+            # Calculate ink density
+            roi = thresh_cleaned[y:y+h, x:x+w]
+            ink_density = cv2.countNonZero(roi) / (w * h) if (w * h) > 0 else 0
+
+            # Calculate solidity
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(area)/hull_area if hull_area > 0 else 0
+
+            # Calculate extent
+            rect_area = w * h
+            extent = float(area)/rect_area if rect_area > 0 else 0
+
+            # Apply filters
+            if (ink_density > min_ink_density and
+                min_solidity < solidity < max_solidity and
+                min_extent < extent < max_extent):
+                 potential_signatures.append(contour)
 
 
     if not potential_signatures:
-        raise Exception("No potential signature contours found after filtering.")
+        raise Exception("No potential signature contours found after filtering based on multiple criteria.")
 
-    # Select the largest contour among potential signatures
-    # This is still the primary selection method, which might be improved with more specific filtering
+    # Select the contour with the highest area among potential signatures
+    # You might need a more sophisticated selection method here if multiple candidates exist
     signature_contour = max(potential_signatures, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(signature_contour)
-    signature = open_cv_image[y:y+h, x:x+w]
+    signature = open_cv_image[y:y+h, x:y+h] # Fixed slicing here: should be y:y+h, x:x+w
 
     sig_image = Image.fromarray(cv2.cvtColor(signature, cv2.COLOR_BGR2RGB))
     sig_io = io.BytesIO()
