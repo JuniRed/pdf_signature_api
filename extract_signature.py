@@ -47,31 +47,31 @@ def extract_signature_from_image_bytes(image_bytes):
         if not contours:
             raise ValueError("No contours found in the cleaned image after morphological operations.")
 
-        # 5. Filter and Score Contours - Parameters adjusted for better scoring
+        # 5. Filter and Score Contours - Parameters adjusted for better scoring precision
         potential_signatures_with_scores = []
 
         # Define ranges and weights for scoring (THESE ARE EXAMPLES - TUNE FOR YOUR IMAGES)
-        # Ranges are still wide to be inclusive, but focus shifts to scoring weights
-        area_range = (50, 200000) # Wide area range
-        density_range = (0.15, 0.85) # Adjusted density range
-        solidity_range = (0.1, 0.8) # Adjusted solidity range (signatures less solid than text blocks)
-        extent_range = (0.1, 0.9) # Adjusted extent range
-        aspect_ratio_range = (0.1, 10.0) # Adjusted aspect ratio range
+        # Ranges are still relatively wide, but weights emphasize key signature properties
+        area_range = (100, 150000) # Moderately wide area range
+        density_range = (0.2, 0.8) # Focus on a typical ink density range
+        solidity_range = (0.15, 0.7) # Focus on signatures being less solid
+        extent_range = (0.2, 0.8) # Focus on extent range
+        aspect_ratio_range = (0.1, 12.0) # Wide aspect ratio range
 
-        # Weights for each criterion - Increased emphasis on density and solidity
-        weight_area = 0.7 # Slightly reduced weight
-        weight_density = 3.0 # Increased weight for density
-        weight_solidity = 2.5 # Increased weight for solidity
-        weight_extent = 1.0
+        # Weights for each criterion - Significantly increased emphasis on density and solidity
+        weight_area = 1.0
+        weight_density = 4.0 # High weight for density
+        weight_solidity = 3.5 # High weight for solidity
+        weight_extent = 1.5
         weight_aspect_ratio = 1.0
 
 
         for contour in contours:
-            # Basic filter based on area and minimum dimensions - Keep it lenient
+            # Basic filter based on area and minimum dimensions - Keep it lenient but prevent tiny noise
             area = cv2.contourArea(contour)
             x, y, w, h = cv2.boundingRect(contour)
 
-            if area > 20 and w > 2 and h > 2: # Very low minimums
+            if area > 30 and w > 3 and h > 3: # Low minimums, slightly higher than before
                 try:
                     # Calculate properties
                     roi = thresh_cleaned[y:y+h, x:x+w]
@@ -96,7 +96,9 @@ def extract_signature_from_image_bytes(image_bytes):
                             mid = (lower + upper) / 2
                             # Score decreases linearly as value moves away from the middle
                             return 1.0 - abs(value - mid) / ((upper - lower)/2 + 1e-6)
-                        return 0.1 # Small score if outside the range but not extremely far
+                        # Significantly penalize values far outside the range
+                        return -0.5 # Negative score for being outside the primary range
+
 
                     score += weight_area * range_score(area, area_range[0], area_range[1])
                     score += weight_density * range_score(ink_density, density_range[0], density_range[1])
@@ -104,10 +106,13 @@ def extract_signature_from_image_bytes(image_bytes):
                     score += weight_extent * range_score(extent, extent_range[0], extent_range[1])
                     score += weight_aspect_ratio * range_score(aspect_ratio, aspect_ratio_range[0], aspect_ratio_range[1])
 
+                    # Additional penalty for very high solidity, which often indicates text blocks
+                    if solidity > 0.8:
+                         score -= weight_solidity * 1.0 # Stronger penalty
 
                     # Add contour and its score if score is above a minimum threshold
-                    # Keep this threshold relatively low to allow potential candidates for duplicate check
-                    min_candidate_score = (weight_density * 0.3 + weight_solidity * 0.3) # Example: needs at least a moderate fit in density and solidity
+                    # Slightly increased the minimum score to filter more noise early
+                    min_candidate_score = (weight_density * 0.5 + weight_solidity * 0.5) # Example: requires a solid moderate fit in density and solidity
                     if score > min_candidate_score:
                          potential_signatures_with_scores.append({'contour': contour, 'score': score, 'bbox': (x,y,w,h)})
 
@@ -126,12 +131,12 @@ def extract_signature_from_image_bytes(image_bytes):
         # Sort potential signatures by score in descending order
         potential_signatures_with_scores.sort(key=lambda x: x['score'], reverse=True)
 
-        # 6. Find Unique Instances based on image content
+        # 6. Find Unique Instances based on image content - CRITICAL for selecting the correct unique one
         unique_signatures_regions_gray = []
         final_signature_contour = None
-        # Tune similarity_threshold and compare_size - CRITICAL for selecting the correct unique one
-        similarity_threshold = 0.95 # High threshold for considering images as duplicates (TUNE THIS!)
-        compare_size = (150, 70) # Adjusted resize dimensions for comparison (TUNE THIS!)
+        # Tune similarity_threshold and compare_size - These are crucial for identifying duplicate signatures
+        similarity_threshold = 0.96 # High threshold for considering images as duplicates (TUNE THIS!)
+        compare_size = (180, 80) # Increased resize dimensions for potentially better comparison (TUNE THIS!)
 
 
         for potential_sig_info in potential_signatures_with_scores:
@@ -180,7 +185,7 @@ def extract_signature_from_image_bytes(image_bytes):
                 unique_signatures_regions_gray.append(resized_sig_img_gray)
                 # The first unique contour from the sorted list (by score) is the best unique candidate
                 final_signature_contour = contour
-                # We found the best unique candidate, exit loop
+                # We found the best unique candidate based on score and uniqueness, exit loop
                 break
 
 
