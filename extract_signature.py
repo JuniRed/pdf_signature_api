@@ -31,7 +31,7 @@ def extract_signature_from_image_bytes(image_bytes):
     min_extent = 0.2 # Minimum extent (adjust as needed)
     max_extent = 0.9 # Maximum extent (adjust as needed)
 
-    potential_signatures = []
+    potential_signatures_contours = []
 
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -55,17 +55,56 @@ def extract_signature_from_image_bytes(image_bytes):
             if (ink_density > min_ink_density and
                 min_solidity < solidity < max_solidity and
                 min_extent < extent < max_extent):
-                 potential_signatures.append(contour)
+                 potential_signatures_contours.append(contour)
 
 
-    if not potential_signatures:
+    if not potential_signatures_contours:
         raise Exception("No potential signature contours found after filtering based on multiple criteria.")
 
-    # Select the contour with the highest area among potential signatures
-    # You might need a more sophisticated selection method here if multiple candidates exist
-    signature_contour = max(potential_signatures, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(signature_contour)
-    signature = open_cv_image[y:y+h, x:y+h] # Fixed slicing here: should be y:y+h, x:x+w
+    # Now, compare the image content within the bounding boxes of potential signatures
+    # to find unique instances.
+    unique_signatures_regions = []
+    unique_signatures_contours = []
+    similarity_threshold = 0.95 # Threshold for considering images as duplicates (adjust as needed)
+    compare_size = (100, 50) # Resize images for comparison (adjust as needed)
+
+
+    for contour in potential_signatures_contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        # Extract the image region from the original color image
+        potential_sig_img = open_cv_image[y:y+h, x:x+w]
+
+        # Resize for comparison
+        if potential_sig_img.shape[0] > 0 and potential_sig_img.shape[1] > 0:
+             resized_sig_img = cv2.resize(potential_sig_img, compare_size)
+             # Convert to grayscale for simpler comparison
+             resized_sig_img_gray = cv2.cvtColor(resized_sig_img, cv2.COLOR_BGR2GRAY)
+        else:
+             continue # Skip empty regions
+
+        is_duplicate = False
+        for unique_region_gray in unique_signatures_regions:
+            # Use structural similarity index (SSIM) or a simple pixel comparison
+            # For exact duplicates, simple equality check after flattening can work if resized to same size
+            if resized_sig_img_gray.shape == unique_region_gray.shape:
+                 # Using correlation for similarity - 1.0 means perfect match
+                 similarity = cv2.matchTemplate(resized_sig_img_gray, unique_region_gray, cv2.TM_CCOEFF_NORMED)[0,0]
+                 if similarity > similarity_threshold:
+                     is_duplicate = True
+                     break
+
+        if not is_duplicate:
+            unique_signatures_regions.append(resized_sig_img_gray)
+            unique_signatures_contours.append(contour)
+
+    if not unique_signatures_contours:
+        raise Exception("No unique signature instances found after duplicate filtering.")
+
+    # Select the first unique signature found (you could add logic to pick based on position if needed)
+    final_signature_contour = unique_signatures_contours[0]
+    x, y, w, h = cv2.boundingRect(final_signature_contour)
+    signature = open_cv_image[y:y+h, x:x+w]
+
 
     sig_image = Image.fromarray(cv2.cvtColor(signature, cv2.COLOR_BGR2RGB))
     sig_io = io.BytesIO()
