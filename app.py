@@ -1,153 +1,85 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import cv2
 import numpy as np
-import io
 import base64
-import tempfile
 from PIL import Image
+import io
 from pdf2image import convert_from_bytes
 
 app = Flask(__name__)
+CORS(app)
 
-def extract_signature(image_data):
-    # Convert image bytes to OpenCV format
-    file_bytes = np.asarray(bytearray(image_data), dtype=np.uint8)
-    open_cv_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+def decode_base64_file(file_str):
+    """Decode base64 string and return bytes."""
+    if ',' in file_str:
+        file_str = file_str.split(',')[1]
+    return base64.b64decode(file_str)
 
-    if open_cv_image is None:
-        raise ValueError("Could not decode image")
+def convert_pdf_to_image(pdf_bytes):
+    """Convert first page of PDF to image (RGB)."""
+    images = convert_from_bytes(pdf_bytes)
+    img = np.array(images[0])
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
 
-    gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+def extract_signature(img):
+    """Extract the largest signature-like contour."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Denoise and find contours
+    kernel = np.ones((3,3), np.uint8)
+    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    potential_signatures_with_scores = []
-    image_area = open_cv_image.shape[0] * open_cv_image.shape[1]
+    # Find the largest contour by area
+    max_contour = max(contours, key=cv2.contourArea, default=None)
+    if max_contour is None or cv2.contourArea(max_contour) < 100:
+        return None
 
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = w / float(h)
-        area = cv2.contourArea(contour)
+    x, y, w, h = cv2.boundingRect(max_contour)
+    signature = img[y:y+h, x:x+w]
 
-        if w < 20 or h < 10 or area < 150:
-            continue
-        if aspect_ratio < 1.5 or aspect_ratio > 10:
-            continue
-        if area / image_area > 0.25:
-            continue
+    # Optional: clean white background
+    white_bg = np.ones_like(signature, dtype=np.uint8) * 255
+    gray_sig = cv2.cvtColor(signature, cv2.COLOR_BGR2GRAY)
+    mask = gray_sig < 200
+    white_bg[mask] = signature[mask]
 
-        score = area * aspect_ratio
-        potential_signatures_with_scores.append({
-            'score': score,
-            'contour': contour,
-            'bbox': (x, y, w, h)
-        })
+    return white_bg
 
-    if not potential_signatures_with_scores:
-        raise ValueError("No signature-like contours found")
-
-    # Sort by descending score
-    potential_signatures_with_scores.sort(key=lambda x: x['score'], reverse=True)
-
-    # Deduplicate and select best unique signature
-    final_signature_contour = None
-    unique_hashes = set()
-
-    def hash_image(image_gray):
-        resized = cv2.resize(image_gray, (64, 32), interpolation=cv2.INTER_AREA)
-        return hash(resized.tobytes())
-
-    similarity_threshold = 0.96
-    compare_size = (180, 80)
-
-    for candidate in potential_signatures_with_scores:
-        x, y, w, h = candidate['bbox']
-
-        if y < 0 or y + h > open_cv_image.shape[0] or x < 0 or x + w > open_cv_image.shape[1]:
-            continue
-
-        region = open_cv_image[y:y+h, x:x+w]
-        if region.size == 0:
-            continue
-
-        try:
-            resized = cv2.resize(region, compare_size, interpolation=cv2.INTER_AREA)
-            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-            hval = hash_image(gray)
-
-            if hval in unique_hashes:
-                continue  # skip duplicate
-            unique_hashes.add(hval)
-
-            final_signature_contour = candidate['contour']
-            break  # keep only one
-
-        except Exception as err:
-            print(f"Error comparing or hashing signature: {err}")
-            continue
-
-    if final_signature_contour is None:
-        raise ValueError("No unique signature contour found")
-
-    x, y, w, h = cv2.boundingRect(final_signature_contour)
-    extracted = open_cv_image[y:y+h, x:x+w]
-
-    # Make white background
-    mask = cv2.cvtColor(extracted, cv2.COLOR_BGR2GRAY)
-    _, mask_bin = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    mask_inv = cv2.bitwise_not(mask_bin)
-    white_bg = np.ones_like(extracted, dtype=np.uint8) * 255
-    signature_cleaned = cv2.bitwise_or(cv2.bitwise_and(extracted, extracted, mask=mask_inv), white_bg)
-
-    # Convert to PNG in memory
-    sig_image = Image.fromarray(cv2.cvtColor(signature_cleaned, cv2.COLOR_BGR2RGB))
-    sig_io = io.BytesIO()
-    sig_image.save(sig_io, format='PNG')
-    return sig_io.getvalue()
+def encode_image_to_base64(img):
+    """Encode BGR image to base64 PNG string."""
+    _, buffer = cv2.imencode('.png', img)
+    return base64.b64encode(buffer).decode()
 
 @app.route('/extract_signature', methods=['POST'])
 def extract_signature_api():
     try:
-        data = request.json
-        base64_input = data.get('file')
+        data = request.get_json()
+        file_data = data.get("file")
 
-        if not base64_input:
-            return jsonify({'error': 'Missing file in request'}), 400
+        if not file_data:
+            return jsonify({"error": "No file data provided"}), 400
 
-        # Handle base64 header
-        if "," in base64_input:
-            base64_input = base64_input.split(",")[1]
+        file_bytes = decode_base64_file(file_data)
 
-        decoded = base64.b64decode(base64_input)
+        if file_data.startswith("data:application/pdf") or file_bytes[:4] == b"%PDF":
+            img = convert_pdf_to_image(file_bytes)
+        else:
+            nparr = np.frombuffer(file_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Convert PDF to image if needed
-        if decoded[:4] == b'%PDF':
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-                temp_pdf.write(decoded)
-                temp_pdf.flush()
-                pages = convert_from_bytes(decoded, first_page=1, last_page=1)
-                if not pages:
-                    return jsonify({'error': 'No pages found in PDF'}), 400
-                image = pages[0]
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='PNG')
-                decoded = img_byte_arr.getvalue()
+        signature = extract_signature(img)
+        if signature is None:
+            return jsonify({"error": "No signature found"}), 404
 
-        # Extract the signature
-        signature_png = extract_signature(decoded)
-
-        # Convert back to base64
-        encoded_output = base64.b64encode(signature_png).decode('utf-8')
-        return jsonify({'signature_base64': encoded_output}), 200
+        encoded = encode_image_to_base64(signature)
+        return jsonify({"signature_base64": encoded})
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/')
-def index():
-    return "Signature Extraction API is running."
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True)
