@@ -4,3 +4,4 @@ numpy
 pillow
 PyMuPDF
 gunicorn
+pdf2image
