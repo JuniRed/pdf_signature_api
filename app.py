@@ -9,7 +9,7 @@ import traceback # Import traceback to get detailed error info
 
 app = Flask(__name__)
 
-# --- extract_signature_from_image_bytes function (merged from extract_signature.py) ---
+# --- extract_signature_from_image_bytes function (merged) ---
 def extract_signature_from_image_bytes(image_bytes):
     try:
         # 1. Load and convert image
