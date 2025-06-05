@@ -1,85 +1,76 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import cv2
-import numpy as np
 import base64
+import numpy as np
+import cv2
 from PIL import Image
 import io
+import os
 from pdf2image import convert_from_bytes
 
 app = Flask(__name__)
 CORS(app)
 
-def decode_base64_file(file_str):
-    """Decode base64 string and return bytes."""
-    if ',' in file_str:
-        file_str = file_str.split(',')[1]
-    return base64.b64decode(file_str)
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+    return binary
 
-def convert_pdf_to_image(pdf_bytes):
-    """Convert first page of PDF to image (RGB)."""
-    images = convert_from_bytes(pdf_bytes)
-    img = np.array(images[0])
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    return img
+def extract_signature(image):
+    preprocessed = preprocess_image(image)
+    contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-def extract_signature(img):
-    """Extract the largest signature-like contour."""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+    signature_contours = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = w / float(h)
+        area = cv2.contourArea(cnt)
+        if 1000 < area < 50000 and 1.0 < aspect_ratio < 6.0:
+            signature_contours.append(cnt)
 
-    # Denoise and find contours
-    kernel = np.ones((3,3), np.uint8)
-    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-    contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask = np.zeros_like(preprocessed)
+    cv2.drawContours(mask, signature_contours, -1, 255, -1)
 
-    # Find the largest contour by area
-    max_contour = max(contours, key=cv2.contourArea, default=None)
-    if max_contour is None or cv2.contourArea(max_contour) < 100:
+    result = cv2.bitwise_and(image, image, mask=mask)
+    white_bg = np.full_like(image, 255)
+    final = np.where(mask[:, :, None] == 255, result, white_bg)
+
+    return final
+
+def read_image_from_base64(base64_string):
+    header_removed = base64_string.split(',')[-1]
+    img_data = base64.b64decode(header_removed)
+    img_array = np.frombuffer(img_data, np.uint8)
+
+    try:
+        # Check if it's a PDF
+        if base64_string.strip().startswith("JVBER"):  # %PDF
+            images = convert_from_bytes(img_data)
+            image = np.array(images[0])
+            return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        else:
+            return cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    except Exception as e:
+        print("Error decoding image:", e)
         return None
 
-    x, y, w, h = cv2.boundingRect(max_contour)
-    signature = img[y:y+h, x:x+w]
-
-    # Optional: clean white background
-    white_bg = np.ones_like(signature, dtype=np.uint8) * 255
-    gray_sig = cv2.cvtColor(signature, cv2.COLOR_BGR2GRAY)
-    mask = gray_sig < 200
-    white_bg[mask] = signature[mask]
-
-    return white_bg
-
-def encode_image_to_base64(img):
-    """Encode BGR image to base64 PNG string."""
-    _, buffer = cv2.imencode('.png', img)
-    return base64.b64encode(buffer).decode()
-
-@app.route('/extract_signature', methods=['POST'])
+@app.route('/extract-signature', methods=['POST'])
 def extract_signature_api():
+    data = request.get_json()
+    if 'file' not in data:
+        return jsonify({'error': 'No file provided'}), 400
+
+    image = read_image_from_base64(data['file'])
+    if image is None:
+        return jsonify({'error': 'Invalid image format'}), 400
+
     try:
-        data = request.get_json()
-        file_data = data.get("file")
-
-        if not file_data:
-            return jsonify({"error": "No file data provided"}), 400
-
-        file_bytes = decode_base64_file(file_data)
-
-        if file_data.startswith("data:application/pdf") or file_bytes[:4] == b"%PDF":
-            img = convert_pdf_to_image(file_bytes)
-        else:
-            nparr = np.frombuffer(file_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        signature = extract_signature(img)
-        if signature is None:
-            return jsonify({"error": "No signature found"}), 404
-
-        encoded = encode_image_to_base64(signature)
-        return jsonify({"signature_base64": encoded})
-
+        signature = extract_signature(image)
+        _, buffer = cv2.imencode('.png', signature)
+        encoded_signature = base64.b64encode(buffer).decode('utf-8')
+        return jsonify({'signature': encoded_signature})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
