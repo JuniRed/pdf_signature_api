@@ -51,7 +51,7 @@ def extract_signature_from_image_bytes(image_bytes):
         potential_signatures_with_scores = []
 
         # Define ranges and weights for scoring (THESE ARE EXAMPLES - TUNE FOR YOUR IMAGES)
-        # Ranges are still relatively wide, but weights emphasize key signature properties
+        # Ranges are relatively wide, but weights emphasize key signature properties
         area_range = (100, 150000) # Moderately wide area range
         density_range = (0.2, 0.8) # Focus on a typical ink density range
         solidity_range = (0.15, 0.7) # Focus on signatures being less solid
@@ -95,7 +95,8 @@ def extract_signature_from_image_bytes(image_bytes):
                         if lower <= value <= upper:
                             mid = (lower + upper) / 2
                             # Score decreases linearly as value moves away from the middle
-                            return 1.0 - abs(value - mid) / ((upper - lower)/2 + 1e-6)
+                            # Added a small value to denominator to avoid division by zero if range is zero
+                            return 1.0 - abs(value - mid) / ((upper - lower)/2.0 + 1e-6)
                         # Significantly penalize values far outside the range
                         return -0.5 # Negative score for being outside the primary range
 
