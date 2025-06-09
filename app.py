@@ -86,7 +86,7 @@ def compare_signatures(img1, img2):
 
 
 # --- API to extract + compare ---
-@app.route('/extract-signature', methods=['POST'])
+@app.route('/signature_api', methods=['POST'])
 def signature_api():
     try:
         data = request.get_json()
