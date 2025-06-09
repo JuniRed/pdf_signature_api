@@ -3,74 +3,101 @@ from flask_cors import CORS
 import base64
 import numpy as np
 import cv2
+from pdf2image import convert_from_bytes
 from PIL import Image
 import io
-import os
-from pdf2image import convert_from_bytes
 
 app = Flask(__name__)
 CORS(app)
 
+
 def preprocess_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-    return binary
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Adaptive thresholding gives better results on varied backgrounds
+    thresh = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 15, 8
+    )
+
+    # Remove small noise
+    kernel = np.ones((3, 3), np.uint8)
+    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+    return cleaned
+
 
 def extract_signature(image):
     preprocessed = preprocess_image(image)
-    contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    contours, _ = cv2.findContours(
+        preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
 
     signature_contours = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         aspect_ratio = w / float(h)
         area = cv2.contourArea(cnt)
-        if 1000 < area < 50000 and 1.0 < aspect_ratio < 6.0:
+
+        # Adjusted values to detect only handwriting-like shapes
+        if 1500 < area < 50000 and 1.5 < aspect_ratio < 8.0:
             signature_contours.append(cnt)
 
-    mask = np.zeros_like(preprocessed)
-    cv2.drawContours(mask, signature_contours, -1, 255, -1)
+    if not signature_contours:
+        raise Exception("No signature-like contours detected.")
 
-    result = cv2.bitwise_and(image, image, mask=mask)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, signature_contours, -1, 255, thickness=cv2.FILLED)
+
+    signature_only = cv2.bitwise_and(image, image, mask=mask)
+
+    # White background
     white_bg = np.full_like(image, 255)
-    final = np.where(mask[:, :, None] == 255, result, white_bg)
+    result = np.where(mask[:, :, None] == 255, signature_only, white_bg)
 
-    return final
+    return result
+
 
 def read_image_from_base64(base64_string):
-    header_removed = base64_string.split(',')[-1]
-    img_data = base64.b64decode(header_removed)
-    img_array = np.frombuffer(img_data, np.uint8)
-
     try:
-        # Check if it's a PDF
-        if base64_string.strip().startswith("JVBER"):  # %PDF
-            images = convert_from_bytes(img_data)
-            image = np.array(images[0])
+        base64_data = base64_string.split(',')[-1]
+        file_data = base64.b64decode(base64_data)
+
+        # Check if it's a PDF by header bytes
+        if file_data[:4] == b'%PDF':
+            images = convert_from_bytes(file_data)
+            image = np.array(images[0])  # Use first page
             return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        else:
-            return cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        # Otherwise treat as image
+        np_array = np.frombuffer(file_data, np.uint8)
+        return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
     except Exception as e:
-        print("Error decoding image:", e)
+        print("Image decoding error:", str(e))
         return None
+
 
 @app.route('/extract-signature', methods=['POST'])
 def extract_signature_api():
-    data = request.get_json()
-    if 'file' not in data:
-        return jsonify({'error': 'No file provided'}), 400
-
-    image = read_image_from_base64(data['file'])
-    if image is None:
-        return jsonify({'error': 'Invalid image format'}), 400
-
     try:
+        data = request.get_json()
+        if 'file' not in data:
+            return jsonify({'error': 'No file provided'}), 400
+
+        image = read_image_from_base64(data['file'])
+        if image is None:
+            return jsonify({'error': 'Unable to read image'}), 400
+
         signature = extract_signature(image)
         _, buffer = cv2.imencode('.png', signature)
         encoded_signature = base64.b64encode(buffer).decode('utf-8')
         return jsonify({'signature': encoded_signature})
+
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Signature extraction failed: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
