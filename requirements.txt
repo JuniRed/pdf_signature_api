@@ -5,3 +5,4 @@ numpy
 pdf2image
 Pillow
 scikit-image
+gunicorn
