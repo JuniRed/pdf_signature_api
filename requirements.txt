@@ -7,4 +7,4 @@ PyMuPDF
 gunicorn
 pdf2image
 flask_cors
-skimage
+scikit-image
