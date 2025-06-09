@@ -4,25 +4,48 @@ import base64
 import numpy as np
 import cv2
 from pdf2image import convert_from_bytes
+from skimage.metrics import structural_similarity as ssim
 import traceback
 
 app = Flask(__name__)
 CORS(app)
 
-# --- Image Preprocessing ---
+
+# --- Decode base64 to image (PDF or image) ---
+def decode_base64_to_image(base64_string):
+    try:
+        base64_data = base64_string.split(',')[-1]
+        file_data = base64.b64decode(base64_data)
+
+        # If PDF
+        if file_data[:4] == b'%PDF':
+            images = convert_from_bytes(file_data)
+            img = np.array(images[0])
+            return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+        # If image
+        np_array = np.frombuffer(file_data, np.uint8)
+        return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+    except Exception as e:
+        print(f"Error decoding base64: {e}")
+        return None
+
+
+# --- Preprocess to highlight signature ---
 def preprocess_image(image):
-    """Convert image to grayscale, blur, and threshold to isolate handwriting."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
     thresh = cv2.adaptiveThreshold(
         blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 15, 8
     )
-    kernel = np.ones((3, 3), np.uint8)
+    kernel = np.ones((2, 2), np.uint8)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
     return cleaned
 
-# --- Signature Extraction ---
+
+# --- Extract signature region only ---
 def extract_signature(image):
     preprocessed = preprocess_image(image)
     contours, _ = cv2.findContours(preprocessed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -32,66 +55,65 @@ def extract_signature(image):
         x, y, w, h = cv2.boundingRect(cnt)
         area = cv2.contourArea(cnt)
         aspect_ratio = w / float(h)
-
-        # Signature-like contours filter
-        if 1500 < area < 50000 and 1.5 < aspect_ratio < 8.0:
+        if 1500 < area < 50000 and 1.2 < aspect_ratio < 8.0:
             signature_contours.append(cnt)
 
     if not signature_contours:
-        raise Exception("No signature detected.")
+        raise Exception("No signature-like contour detected.")
 
-    # Create a mask and extract only signature area
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.drawContours(mask, signature_contours, -1, 255, cv2.FILLED)
-    signature_only = cv2.bitwise_and(image, image, mask=mask)
 
-    # White background for final image
+    signature_img = cv2.bitwise_and(image, image, mask=mask)
     white_bg = np.full_like(image, 255)
-    result = np.where(mask[:, :, None] == 255, signature_only, white_bg)
+    result = np.where(mask[:, :, None] == 255, signature_img, white_bg)
+
     return result
 
-# --- Base64 Decoder ---
-def read_image_from_base64(base64_string):
-    try:
-        base64_data = base64_string.split(',')[-1]
-        file_data = base64.b64decode(base64_data)
 
-        # Detect and handle PDF
-        if file_data[:4] == b'%PDF':
-            images = convert_from_bytes(file_data)
-            image = np.array(images[0])
-            return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+# --- Compare two signature images using SSIM ---
+def compare_signatures(img1, img2):
+    img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
-        # Otherwise, handle image (JPG/PNG)
-        np_array = np.frombuffer(file_data, np.uint8)
-        return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+    # Resize to same shape
+    h, w = min(img1_gray.shape[0], img2_gray.shape[0]), min(img1_gray.shape[1], img2_gray.shape[1])
+    img1_gray = cv2.resize(img1_gray, (w, h))
+    img2_gray = cv2.resize(img2_gray, (w, h))
 
-    except Exception as e:
-        print("Image decoding error:", str(e))
-        return None
+    score, _ = ssim(img1_gray, img2_gray, full=True)
+    return round(float(score), 4)
 
-# --- API Endpoint ---
-@app.route('/extract-signature', methods=['POST'])
-def extract_signature_api():
+
+# --- API to extract + compare ---
+@app.route('/signature-api', methods=['POST'])
+def signature_api():
     try:
         data = request.get_json()
-        if 'file' not in data:
-            return jsonify({'error': 'Missing "file" in request'}), 400
+        if not data or 'original' not in data or 'input' not in data:
+            return jsonify({'error': 'Missing "original" or "input" in request'}), 400
 
-        image = read_image_from_base64(data['file'])
-        if image is None:
-            return jsonify({'error': 'Invalid or unreadable image'}), 400
+        original_img = decode_base64_to_image(data['original'])
+        input_img = decode_base64_to_image(data['input'])
 
-        signature = extract_signature(image)
-        _, buffer = cv2.imencode('.png', signature)
-        encoded_signature = base64.b64encode(buffer).decode('utf-8')
+        if original_img is None or input_img is None:
+            return jsonify({'error': 'Could not decode image'}), 400
 
-        return jsonify({'signature': encoded_signature})
+        original_sig = extract_signature(original_img)
+        input_sig = extract_signature(input_img)
+
+        similarity = compare_signatures(original_sig, input_sig)
+
+        return jsonify({
+            'similarity': similarity,
+            'match': similarity > 0.85
+        })
 
     except Exception as e:
-        print("Traceback:\n", traceback.format_exc())
-        return jsonify({'error': f"Internal error: {str(e)}"}), 500
+        print(traceback.format_exc())
+        return jsonify({'error': f"Internal server error: {str(e)}"}), 500
 
-# --- Run Server ---
+
+# --- Run the server ---
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
