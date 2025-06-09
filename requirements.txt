@@ -1,10 +1,7 @@
 Flask
-flask
-opencv-python
+flask-cors
+opencv-python-headless
 numpy
-pillow
-PyMuPDF
-gunicorn
 pdf2image
-flask_cors
+Pillow
 scikit-image
