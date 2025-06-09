@@ -39,12 +39,14 @@ def extract_signature(image):
         aspect_ratio = w / float(h)
         area = cv2.contourArea(cnt)
 
+        # Adjust these thresholds based on your use case
         if 1500 < area < 50000 and 1.5 < aspect_ratio < 8.0:
             signature_contours.append(cnt)
 
     if not signature_contours:
         raise Exception("No signature-like contours detected.")
 
+    # Create mask and extract signature region
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.drawContours(mask, signature_contours, -1, 255, thickness=cv2.FILLED)
 
@@ -62,11 +64,13 @@ def read_image_from_base64(base64_string):
         base64_data = base64_string.split(',')[-1]
         file_data = base64.b64decode(base64_data)
 
+        # Detect PDF
         if file_data[:4] == b'%PDF':
             images = convert_from_bytes(file_data)
             image = np.array(images[0])
             return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
+        # Regular image
         np_array = np.frombuffer(file_data, np.uint8)
         return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
@@ -75,7 +79,9 @@ def read_image_from_base64(base64_string):
         return None
 
 
+# ✅ Route alias for Power Automate compatibility
 @app.route('/extract-signature', methods=['POST'])
+@app.route('/extract_signature_from_pdf', methods=['POST'])
 def extract_signature_api():
     try:
         data = request.get_json()
